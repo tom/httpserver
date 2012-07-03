@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project name="httpserver" default="build">
+
+    <property name="build.number" value="dev.build"/>
+    <property name="src" value="${basedir}/src"/>
+    <property name="build" value="${basedir}/build"/>
+    <property name="classes" value="${basedir}/build/classes"/>
+    <property name="artifacts" value="${build}/artifacts"/>
+
+    <property name="release.version" value="${build.number}"/>
+    <property name="release.name" value="${ant.project.name}-${release.version}"/>
+    <property name="release.jar" value="${release.name}.jar"/>
+    <property name="release.jar.path" value="${artifacts}/${release.jar}"/>
+
+    <import file="${build}/macros.xml" />
+
+    <path id="all.dependancies" />
+
+    <target name="compile">
+        <compile.and.jar src="${src}" jar="${release.jar.path}" classpathref="all.dependancies"
+                         version="${release.version}"/>
+    </target>
+
+    <target name="build" description="build all">
+        <parallel>
+            <antcall target="clean"/>
+        </parallel>
+        <antcall target="compile"/>
+    </target>
+
+    <target name="clean" description="cleanup all">
+        <delete dir="${artifacts}"/>
+    </target>
+
+</project>
