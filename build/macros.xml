@@ -3,6 +3,7 @@
     <macrodef name="compile.and.jar">
         <attribute name="src"/>
         <attribute name="jar"/>
+        <attribute name="srcJar"/>
         <attribute name="classpathref"/>
         <attribute name="version"/>
         <attribute name="classes" default="@{jar}.classes"/>
@@ -22,6 +23,8 @@
                     <exclude name="**/*.scala"/>
                 </fileset>
             </copy>
+
+            <jar destfile="@{srcJar}" basedir="@{src}" />
 
             <property name="manifest" value="@{jar}.mf"/>
             <manifest file="${manifest}">

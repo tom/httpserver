@@ -9,7 +9,8 @@
 
     <property name="release.version" value="${build.number}"/>
     <property name="release.name" value="${ant.project.name}-${release.version}"/>
-    <property name="release.jar" value="${release.name}.jar"/>
+    <property name="release.jar" value="${release.name}-${release.version}.jar"/>
+    <property name="release.src.jar.path" value="${artifacts}/${release.name}-${release.version}-sources.jar"/>
     <property name="release.jar.path" value="${artifacts}/${release.jar}"/>
 
     <import file="${build}/macros.xml" />
@@ -17,7 +18,7 @@
     <path id="all.dependancies" />
 
     <target name="compile">
-        <compile.and.jar src="${src}" jar="${release.jar.path}" classpathref="all.dependancies"
+        <compile.and.jar src="${src}" jar="${release.jar.path}" srcJar="${release.src.jar.path}" classpathref="all.dependancies"
                          version="${release.version}"/>
     </target>
 
