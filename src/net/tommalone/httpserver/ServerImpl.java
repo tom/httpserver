@@ -353,7 +353,7 @@ class ServerImpl implements TimeSource {
                     }
 
                     /* process the selected list now  */
-                    if(terminating)
+                    if(terminating || finished)
                         continue;
                     Iterator<SelectionKey> iter = selector.selectedKeys().iterator();
                     while (iter.hasNext()) {
