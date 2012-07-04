@@ -25,19 +25,20 @@
 
 package net.tommalone.httpserver;
 
+import net.tommalone.httpserver.HttpConnection.State;
+
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLEngine;
+import java.io.BufferedInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.*;
-import java.io.*;
-import java.nio.*;
-import java.security.*;
 import java.nio.channels.*;
 import java.util.*;
-import java.util.concurrent.*;
-import java.util.logging.Logger;
+import java.util.concurrent.Executor;
 import java.util.logging.Level;
-import javax.net.ssl.*;
-import net.tommalone.httpserver.*;
-import net.tommalone.httpserver.spi.*;
-import net.tommalone.httpserver.HttpConnection.State;
+import java.util.logging.Logger;
 
 /**
  * Provides implementation for both HTTP and HTTPS
@@ -72,119 +73,123 @@ class ServerImpl implements TimeSource {
     private volatile long subticks = 0;
     private volatile long ticks; /* number of clock ticks since server started */
     private HttpServer wrapper;
+    private Thread thread;
 
     final static int CLOCK_TICK = ServerConfig.getClockTick();
     final static long IDLE_INTERVAL = ServerConfig.getIdleInterval();
     final static int MAX_IDLE_CONNECTIONS = ServerConfig.getMaxIdleConnections();
-    final static long TIMER_MILLIS = ServerConfig.getTimerMillis ();
-    final static long MAX_REQ_TIME=getTimeMillis(ServerConfig.getMaxReqTime());
-    final static long MAX_RSP_TIME=getTimeMillis(ServerConfig.getMaxRspTime());
+    final static long TIMER_MILLIS = ServerConfig.getTimerMillis();
+    final static long MAX_REQ_TIME = getTimeMillis(ServerConfig.getMaxReqTime());
+    final static long MAX_RSP_TIME = getTimeMillis(ServerConfig.getMaxRspTime());
     final static boolean timer1Enabled = MAX_REQ_TIME != -1 || MAX_RSP_TIME != -1;
 
     private Timer timer, timer1;
     private Logger logger;
 
-    ServerImpl (
-        HttpServer wrapper, String protocol, InetSocketAddress addr, int backlog
+    ServerImpl(
+            HttpServer wrapper, String protocol, InetSocketAddress addr, int backlog
     ) throws IOException {
 
         this.protocol = protocol;
         this.wrapper = wrapper;
-        this.logger = Logger.getLogger ("net.tommalone.httpserver");
-        ServerConfig.checkLegacyProperties (logger);
-        https = protocol.equalsIgnoreCase ("https");
+        this.logger = Logger.getLogger("net.tommalone.httpserver");
+        ServerConfig.checkLegacyProperties(logger);
+        https = protocol.equalsIgnoreCase("https");
         this.address = addr;
         contexts = new ContextList();
         schan = ServerSocketChannel.open();
         if (addr != null) {
             ServerSocket socket = schan.socket();
-            socket.bind (addr, backlog);
+            socket.bind(addr, backlog);
             bound = true;
         }
-        selector = Selector.open ();
-        schan.configureBlocking (false);
-        listenerKey = schan.register (selector, SelectionKey.OP_ACCEPT);
+        selector = Selector.open();
+        schan.configureBlocking(false);
+        listenerKey = schan.register(selector, SelectionKey.OP_ACCEPT);
         dispatcher = new Dispatcher();
-        idleConnections = Collections.synchronizedSet (new HashSet<HttpConnection>());
-        allConnections = Collections.synchronizedSet (new HashSet<HttpConnection>());
-        reqConnections = Collections.synchronizedSet (new HashSet<HttpConnection>());
-        rspConnections = Collections.synchronizedSet (new HashSet<HttpConnection>());
+        idleConnections = Collections.synchronizedSet(new HashSet<HttpConnection>());
+        allConnections = Collections.synchronizedSet(new HashSet<HttpConnection>());
+        reqConnections = Collections.synchronizedSet(new HashSet<HttpConnection>());
+        rspConnections = Collections.synchronizedSet(new HashSet<HttpConnection>());
         time = System.currentTimeMillis();
-        timer = new Timer ("server-timer", true);
-        timer.schedule (new ServerTimerTask(), CLOCK_TICK, CLOCK_TICK);
+        timer = new Timer("server-timer", true);
+        timer.schedule(new ServerTimerTask(), CLOCK_TICK, CLOCK_TICK);
         if (timer1Enabled) {
-            timer1 = new Timer ("server-timer1", true);
-            timer1.schedule (new ServerTimerTask1(),TIMER_MILLIS,TIMER_MILLIS);
-            logger.config ("HttpServer timer1 enabled period in ms:  "+TIMER_MILLIS);
-            logger.config ("MAX_REQ_TIME:  "+MAX_REQ_TIME);
-            logger.config ("MAX_RSP_TIME:  "+MAX_RSP_TIME);
+            timer1 = new Timer("server-timer1", true);
+            timer1.schedule(new ServerTimerTask1(), TIMER_MILLIS, TIMER_MILLIS);
+            logger.config("HttpServer timer1 enabled period in ms:  " + TIMER_MILLIS);
+            logger.config("MAX_REQ_TIME:  " + MAX_REQ_TIME);
+            logger.config("MAX_RSP_TIME:  " + MAX_RSP_TIME);
         }
         events = new LinkedList<Event>();
-        logger.config ("HttpServer created "+protocol+" "+ addr);
+        logger.config("HttpServer created " + protocol + " " + addr);
     }
 
-    public void bind (InetSocketAddress addr, int backlog) throws IOException {
+    public void bind(InetSocketAddress addr, int backlog) throws IOException {
         if (bound) {
-            throw new BindException ("HttpServer already bound");
+            throw new BindException("HttpServer already bound");
         }
         if (addr == null) {
-            throw new NullPointerException ("null address");
+            throw new NullPointerException("null address");
         }
         ServerSocket socket = schan.socket();
-        socket.bind (addr, backlog);
+        socket.bind(addr, backlog);
         bound = true;
     }
 
-    public void start () {
+    public void start() {
         if (!bound || started || finished) {
-            throw new IllegalStateException ("server in wrong state");
+            throw new IllegalStateException("server in wrong state");
         }
         if (executor == null) {
             executor = new DefaultExecutor();
         }
-        Thread t = new Thread (dispatcher);
+        thread = new Thread(dispatcher);
         started = true;
-        t.start();
+        thread.start();
     }
 
-    public void setExecutor (Executor executor) {
+    public void setExecutor(Executor executor) {
         if (started) {
-            throw new IllegalStateException ("server already started");
+            throw new IllegalStateException("server already started");
         }
         this.executor = executor;
     }
 
     private static class DefaultExecutor implements Executor {
-        public void execute (Runnable task) {
+        public void execute(Runnable task) {
             task.run();
         }
     }
 
-    public Executor getExecutor () {
+    public Executor getExecutor() {
         return executor;
     }
 
-    public void setHttpsConfigurator (HttpsConfigurator config) {
+    public void setHttpsConfigurator(HttpsConfigurator config) {
         if (config == null) {
-            throw new NullPointerException ("null HttpsConfigurator");
+            throw new NullPointerException("null HttpsConfigurator");
         }
         if (started) {
-            throw new IllegalStateException ("server already started");
+            throw new IllegalStateException("server already started");
         }
         this.httpsConfig = config;
         sslContext = config.getSSLContext();
     }
 
-    public HttpsConfigurator getHttpsConfigurator () {
+    public HttpsConfigurator getHttpsConfigurator() {
         return httpsConfig;
     }
 
-    public void stop (int delay) {
+    public void stop(int delay) {
         if (delay < 0) {
-            throw new IllegalArgumentException ("negative delay parameter");
+            throw new IllegalArgumentException("negative delay parameter");
         }
         terminating = true;
-        try { schan.close(); } catch (IOException e) {}
+        try {
+            schan.close();
+        } catch (IOException e) {
+        }
         selector.wakeup();
         long latest = System.currentTimeMillis() + delay * 1000;
         while (System.currentTimeMillis() < latest) {
@@ -207,62 +212,62 @@ class ServerImpl implements TimeSource {
             timer1.cancel();
         }
         try {
-            if(selector.isOpen())
-                selector.close();
+            selector.close();
+            thread.interrupt();
         } catch (IOException e) {
-            
+
         }
     }
 
     Dispatcher dispatcher;
 
-    public synchronized HttpContextImpl createContext (String path, HttpHandler handler) {
+    public synchronized HttpContextImpl createContext(String path, HttpHandler handler) {
         if (handler == null || path == null) {
-            throw new NullPointerException ("null handler, or path parameter");
+            throw new NullPointerException("null handler, or path parameter");
         }
-        HttpContextImpl context = new HttpContextImpl (protocol, path, handler, this);
-        contexts.add (context);
-        logger.config ("context created: " + path);
+        HttpContextImpl context = new HttpContextImpl(protocol, path, handler, this);
+        contexts.add(context);
+        logger.config("context created: " + path);
         return context;
     }
 
-    public synchronized HttpContextImpl createContext (String path) {
+    public synchronized HttpContextImpl createContext(String path) {
         if (path == null) {
-            throw new NullPointerException ("null path parameter");
+            throw new NullPointerException("null path parameter");
         }
-        HttpContextImpl context = new HttpContextImpl (protocol, path, null, this);
-        contexts.add (context);
-        logger.config ("context created: " + path);
+        HttpContextImpl context = new HttpContextImpl(protocol, path, null, this);
+        contexts.add(context);
+        logger.config("context created: " + path);
         return context;
     }
 
-    public synchronized void removeContext (String path) throws IllegalArgumentException {
+    public synchronized void removeContext(String path) throws IllegalArgumentException {
         if (path == null) {
-            throw new NullPointerException ("null path parameter");
+            throw new NullPointerException("null path parameter");
         }
-        contexts.remove (protocol, path);
-        logger.config ("context removed: " + path);
+        contexts.remove(protocol, path);
+        logger.config("context removed: " + path);
     }
 
-    public synchronized void removeContext (HttpContext context) throws IllegalArgumentException {
+    public synchronized void removeContext(HttpContext context) throws IllegalArgumentException {
         if (!(context instanceof HttpContextImpl)) {
-            throw new IllegalArgumentException ("wrong HttpContext type");
+            throw new IllegalArgumentException("wrong HttpContext type");
         }
-        contexts.remove ((HttpContextImpl)context);
-        logger.config ("context removed: " + context.getPath());
+        contexts.remove((HttpContextImpl) context);
+        logger.config("context removed: " + context.getPath());
     }
 
     public InetSocketAddress getAddress() {
-        return (InetSocketAddress)schan.socket().getLocalSocketAddress();
+        return (InetSocketAddress) schan.socket().getLocalSocketAddress();
     }
 
-    Selector getSelector () {
+    Selector getSelector() {
         return selector;
     }
 
-    void addEvent (Event r) {
+    void addEvent(Event r) {
         synchronized (lolock) {
-            events.add (r);
+            events.add(r);
             selector.wakeup();
         }
     }
@@ -271,7 +276,7 @@ class ServerImpl implements TimeSource {
 
     class Dispatcher implements Runnable {
 
-        private void handleEvent (Event r) {
+        private void handleEvent(Event r) {
             ExchangeImpl t = r.exchange;
             HttpConnection c = t.getConnection();
             try {
@@ -281,27 +286,27 @@ class ServerImpl implements TimeSource {
                     if (terminating && exchanges == 0) {
                         finished = true;
                     }
-                    responseCompleted (c);
+                    responseCompleted(c);
                     LeftOverInputStream is = t.getOriginalInputStream();
                     if (!is.isEOF()) {
                         t.close = true;
                     }
                     if (t.close || idleConnections.size() >= MAX_IDLE_CONNECTIONS) {
                         c.close();
-                        allConnections.remove (c);
+                        allConnections.remove(c);
                     } else {
                         if (is.isDataBuffered()) {
                             /* don't re-enable the interestops, just handle it */
-                            requestStarted (c);
-                            handle (c.getChannel(), c);
+                            requestStarted(c);
+                            handle(c.getChannel(), c);
                         } else {
-                            connsToRegister.add (c);
+                            connsToRegister.add(c);
                         }
                     }
                 }
             } catch (IOException e) {
-                logger.log (
-                    Level.FINER, "Dispatcher (1)", e
+                logger.log(
+                        Level.FINER, "Dispatcher (1)", e
                 );
                 c.close();
             }
@@ -310,16 +315,16 @@ class ServerImpl implements TimeSource {
         final LinkedList<HttpConnection> connsToRegister =
                 new LinkedList<HttpConnection>();
 
-        void reRegister (HttpConnection c) {
+        void reRegister(HttpConnection c) {
             /* re-register with selector */
             try {
                 SocketChannel chan = c.getChannel();
-                chan.configureBlocking (false);
-                SelectionKey key = chan.register (selector, SelectionKey.OP_READ);
-                key.attach (c);
+                chan.configureBlocking(false);
+                SelectionKey key = chan.register(selector, SelectionKey.OP_READ);
+                key.attach(c);
                 c.selectionKey = key;
                 c.time = getTime() + IDLE_INTERVAL;
-                idleConnections.add (c);
+                idleConnections.add(c);
             } catch (IOException e) {
                 dprint(e);
                 logger.log(Level.FINER, "Dispatcher(8)", e);
@@ -331,7 +336,7 @@ class ServerImpl implements TimeSource {
             while (!finished) {
                 try {
                     ListIterator<HttpConnection> li =
-                        connsToRegister.listIterator();
+                            connsToRegister.listIterator();
                     for (HttpConnection c : connsToRegister) {
                         reRegister(c);
                     }
@@ -347,19 +352,19 @@ class ServerImpl implements TimeSource {
                     }
 
                     if (list != null) {
-                        for (Event r: list) {
-                            handleEvent (r);
+                        for (Event r : list) {
+                            handleEvent(r);
                         }
                     }
 
                     /* process the selected list now  */
-                    if(terminating || finished)
+                    if (terminating || finished)
                         continue;
                     Iterator<SelectionKey> iter = selector.selectedKeys().iterator();
                     while (iter.hasNext()) {
                         SelectionKey key = iter.next();
-                        iter.remove ();
-                        if (key.equals (listenerKey)) {
+                        iter.remove();
+                        if (key.equals(listenerKey)) {
                             if (terminating) {
                                 continue;
                             }
@@ -367,29 +372,29 @@ class ServerImpl implements TimeSource {
                             if (chan == null) {
                                 continue; /* cancel something ? */
                             }
-                            chan.configureBlocking (false);
-                            SelectionKey newkey = chan.register (selector, SelectionKey.OP_READ);
-                            HttpConnection c = new HttpConnection ();
+                            chan.configureBlocking(false);
+                            SelectionKey newkey = chan.register(selector, SelectionKey.OP_READ);
+                            HttpConnection c = new HttpConnection();
                             c.selectionKey = newkey;
-                            c.setChannel (chan);
-                            newkey.attach (c);
-                            requestStarted (c);
-                            allConnections.add (c);
+                            c.setChannel(chan);
+                            newkey.attach(c);
+                            requestStarted(c);
+                            allConnections.add(c);
                         } else {
                             try {
                                 if (key.isReadable()) {
                                     boolean closed;
-                                    SocketChannel chan = (SocketChannel)key.channel();
-                                    HttpConnection conn = (HttpConnection)key.attachment();
+                                    SocketChannel chan = (SocketChannel) key.channel();
+                                    HttpConnection conn = (HttpConnection) key.attachment();
 
                                     key.cancel();
-                                    chan.configureBlocking (true);
+                                    chan.configureBlocking(true);
                                     if (idleConnections.remove(conn)) {
                                         // was an idle connection so add it
                                         // to reqConnections set.
-                                        requestStarted (conn);
+                                        requestStarted(conn);
                                     }
-                                    handle (chan, conn);
+                                    handle(chan, conn);
                                 } else {
                                     assert false;
                                 }
@@ -403,54 +408,53 @@ class ServerImpl implements TimeSource {
                     // call the selector just to process the cancelled keys
                     selector.selectNow();
                 } catch (IOException e) {
-                    logger.log (Level.FINER, "Dispatcher (4)", e);
+                    logger.log(Level.FINER, "Dispatcher (4)", e);
                 } catch (Exception e) {
                     e.printStackTrace();
-                    logger.log (Level.FINER, "Dispatcher (7)", e);
+                    logger.log(Level.FINER, "Dispatcher (7)", e);
                 }
             }
         }
 
-        private void handleException (SelectionKey key, Exception e) {
-            HttpConnection conn = (HttpConnection)key.attachment();
+        private void handleException(SelectionKey key, Exception e) {
+            HttpConnection conn = (HttpConnection) key.attachment();
             if (e != null) {
-                logger.log (Level.FINER, "Dispatcher (2)", e);
+                logger.log(Level.FINER, "Dispatcher (2)", e);
             }
             closeConnection(conn);
         }
 
-        public void handle (SocketChannel chan, HttpConnection conn)
-        throws IOException
-        {
+        public void handle(SocketChannel chan, HttpConnection conn)
+                throws IOException {
             try {
-                Exchange t = new Exchange (chan, protocol, conn);
-                executor.execute (t);
+                Exchange t = new Exchange(chan, protocol, conn);
+                executor.execute(t);
             } catch (HttpError e1) {
-                logger.log (Level.FINER, "Dispatcher (4)", e1);
+                logger.log(Level.FINER, "Dispatcher (4)", e1);
                 closeConnection(conn);
             } catch (IOException e) {
-                logger.log (Level.FINER, "Dispatcher (5)", e);
+                logger.log(Level.FINER, "Dispatcher (5)", e);
                 closeConnection(conn);
             }
         }
     }
 
-    static boolean debug = ServerConfig.debugEnabled ();
+    static boolean debug = ServerConfig.debugEnabled();
 
-    static synchronized void dprint (String s) {
+    static synchronized void dprint(String s) {
         if (debug) {
-            System.out.println (s);
+            System.out.println(s);
         }
     }
 
-    static synchronized void dprint (Exception e) {
+    static synchronized void dprint(Exception e) {
         if (debug) {
-            System.out.println (e);
+            System.out.println(e);
             e.printStackTrace();
         }
     }
 
-    Logger getLogger () {
+    Logger getLogger() {
         return logger;
     }
 
@@ -458,22 +462,22 @@ class ServerImpl implements TimeSource {
         conn.close();
         allConnections.remove(conn);
         switch (conn.getState()) {
-        case REQUEST:
-            reqConnections.remove(conn);
-            break;
-        case RESPONSE:
-            rspConnections.remove(conn);
-            break;
-        case IDLE:
-            idleConnections.remove(conn);
-            break;
+            case REQUEST:
+                reqConnections.remove(conn);
+                break;
+            case RESPONSE:
+                rspConnections.remove(conn);
+                break;
+            case IDLE:
+                idleConnections.remove(conn);
+                break;
         }
         assert !reqConnections.remove(conn);
         assert !rspConnections.remove(conn);
         assert !idleConnections.remove(conn);
     }
 
-        /* per exchange task */
+    /* per exchange task */
 
     class Exchange implements Runnable {
         SocketChannel chan;
@@ -486,13 +490,13 @@ class ServerImpl implements TimeSource {
         HttpContextImpl ctx;
         boolean rejected = false;
 
-        Exchange (SocketChannel chan, String protocol, HttpConnection conn) throws IOException {
+        Exchange(SocketChannel chan, String protocol, HttpConnection conn) throws IOException {
             this.chan = chan;
             this.connection = conn;
             this.protocol = protocol;
         }
 
-        public void run () {
+        public void run() {
             /* context will be null for new connections */
             context = connection.getHttpContext();
             boolean newconnection;
@@ -500,7 +504,7 @@ class ServerImpl implements TimeSource {
             String requestLine = null;
             SSLStreams sslStreams = null;
             try {
-                if (context != null ) {
+                if (context != null) {
                     this.rawin = connection.getInputStream();
                     this.rawout = connection.getRawOutputStream();
                     newconnection = false;
@@ -509,104 +513,104 @@ class ServerImpl implements TimeSource {
                     newconnection = true;
                     if (https) {
                         if (sslContext == null) {
-                            logger.warning ("SSL connection received. No https contxt created");
-                            throw new HttpError ("No SSL context established");
+                            logger.warning("SSL connection received. No https contxt created");
+                            throw new HttpError("No SSL context established");
                         }
-                        sslStreams = new SSLStreams (ServerImpl.this, sslContext, chan);
+                        sslStreams = new SSLStreams(ServerImpl.this, sslContext, chan);
                         rawin = sslStreams.getInputStream();
                         rawout = sslStreams.getOutputStream();
                         engine = sslStreams.getSSLEngine();
                         connection.sslStreams = sslStreams;
                     } else {
                         rawin = new BufferedInputStream(
-                            new Request.ReadStream (
+                                new Request.ReadStream(
+                                        ServerImpl.this, chan
+                                ));
+                        rawout = new Request.WriteStream(
                                 ServerImpl.this, chan
-                        ));
-                        rawout = new Request.WriteStream (
-                            ServerImpl.this, chan
                         );
                     }
                     connection.raw = rawin;
                     connection.rawout = rawout;
                 }
-                Request req = new Request (rawin, rawout);
+                Request req = new Request(rawin, rawout);
                 requestLine = req.requestLine();
                 if (requestLine == null) {
                     /* connection closed */
                     closeConnection(connection);
                     return;
                 }
-                int space = requestLine.indexOf (' ');
+                int space = requestLine.indexOf(' ');
                 if (space == -1) {
-                    reject (Code.HTTP_BAD_REQUEST,
+                    reject(Code.HTTP_BAD_REQUEST,
                             requestLine, "Bad request line");
                     return;
                 }
-                String method = requestLine.substring (0, space);
-                int start = space+1;
+                String method = requestLine.substring(0, space);
+                int start = space + 1;
                 space = requestLine.indexOf(' ', start);
                 if (space == -1) {
-                    reject (Code.HTTP_BAD_REQUEST,
+                    reject(Code.HTTP_BAD_REQUEST,
                             requestLine, "Bad request line");
                     return;
                 }
-                String uriStr = requestLine.substring (start, space);
-                URI uri = new URI (uriStr);
-                start = space+1;
-                String version = requestLine.substring (start);
+                String uriStr = requestLine.substring(start, space);
+                URI uri = new URI(uriStr);
+                start = space + 1;
+                String version = requestLine.substring(start);
                 Headers headers = req.headers();
-                String s = headers.getFirst ("Transfer-encoding");
+                String s = headers.getFirst("Transfer-encoding");
                 long clen = 0L;
-                if (s !=null && s.equalsIgnoreCase ("chunked")) {
+                if (s != null && s.equalsIgnoreCase("chunked")) {
                     clen = -1L;
                 } else {
-                    s = headers.getFirst ("Content-Length");
+                    s = headers.getFirst("Content-Length");
                     if (s != null) {
                         clen = Long.parseLong(s);
                     }
                     if (clen == 0) {
-                        requestCompleted (connection);
+                        requestCompleted(connection);
                     }
                 }
-                ctx = contexts.findContext (protocol, uri.getPath());
+                ctx = contexts.findContext(protocol, uri.getPath());
                 if (ctx == null) {
-                    reject (Code.HTTP_NOT_FOUND,
+                    reject(Code.HTTP_NOT_FOUND,
                             requestLine, "No context found for request");
                     return;
                 }
-                connection.setContext (ctx);
+                connection.setContext(ctx);
                 if (ctx.getHandler() == null) {
-                    reject (Code.HTTP_INTERNAL_ERROR,
+                    reject(Code.HTTP_INTERNAL_ERROR,
                             requestLine, "No handler for context");
                     return;
                 }
-                tx = new ExchangeImpl (
-                    method, uri, req, clen, connection
+                tx = new ExchangeImpl(
+                        method, uri, req, clen, connection
                 );
                 String chdr = headers.getFirst("Connection");
                 Headers rheaders = tx.getResponseHeaders();
 
-                if (chdr != null && chdr.equalsIgnoreCase ("close")) {
+                if (chdr != null && chdr.equalsIgnoreCase("close")) {
                     tx.close = true;
                 }
-                if (version.equalsIgnoreCase ("http/1.0")) {
+                if (version.equalsIgnoreCase("http/1.0")) {
                     tx.http10 = true;
                     if (chdr == null) {
                         tx.close = true;
-                        rheaders.set ("Connection", "close");
-                    } else if (chdr.equalsIgnoreCase ("keep-alive")) {
-                        rheaders.set ("Connection", "keep-alive");
-                        int idle=(int)ServerConfig.getIdleInterval()/1000;
-                        int max=(int)ServerConfig.getMaxIdleConnections();
-                        String val = "timeout="+idle+", max="+max;
-                        rheaders.set ("Keep-Alive", val);
+                        rheaders.set("Connection", "close");
+                    } else if (chdr.equalsIgnoreCase("keep-alive")) {
+                        rheaders.set("Connection", "keep-alive");
+                        int idle = (int) ServerConfig.getIdleInterval() / 1000;
+                        int max = (int) ServerConfig.getMaxIdleConnections();
+                        String val = "timeout=" + idle + ", max=" + max;
+                        rheaders.set("Keep-Alive", val);
                     }
                 }
 
                 if (newconnection) {
-                    connection.setParameters (
-                        rawin, rawout, chan, engine, sslStreams,
-                        sslContext, protocol, ctx, rawin
+                    connection.setParameters(
+                            rawin, rawout, chan, engine, sslStreams,
+                            sslContext, protocol, ctx, rawin
                     );
                 }
                 /* check if client sent an Expect 100 Continue.
@@ -615,10 +619,10 @@ class ServerImpl implements TimeSource {
                  * be involved in this process.
                  */
                 String exp = headers.getFirst("Expect");
-                if (exp != null && exp.equalsIgnoreCase ("100-continue")) {
-                    logReply (100, requestLine, null);
-                    sendReply (
-                        Code.HTTP_CONTINUE, false, null
+                if (exp != null && exp.equalsIgnoreCase("100-continue")) {
+                    logReply(100, requestLine, null);
+                    sendReply(
+                            Code.HTTP_CONTINUE, false, null
                     );
                 }
                 /* uf is the list of filters seen/set by the user.
@@ -632,28 +636,28 @@ class ServerImpl implements TimeSource {
                 List<Filter> uf = ctx.getFilters();
 
                 Filter.Chain sc = new Filter.Chain(sf, ctx.getHandler());
-                Filter.Chain uc = new Filter.Chain(uf, new LinkHandler (sc));
+                Filter.Chain uc = new Filter.Chain(uf, new LinkHandler(sc));
 
                 /* set up the two stream references */
                 tx.getRequestBody();
                 tx.getResponseBody();
                 if (https) {
-                    uc.doFilter (new HttpsExchangeImpl (tx));
+                    uc.doFilter(new HttpsExchangeImpl(tx));
                 } else {
-                    uc.doFilter (new HttpExchangeImpl (tx));
+                    uc.doFilter(new HttpExchangeImpl(tx));
                 }
 
             } catch (IOException e1) {
-                logger.log (Level.FINER, "ServerImpl.Exchange (1)", e1);
+                logger.log(Level.FINER, "ServerImpl.Exchange (1)", e1);
                 closeConnection(connection);
             } catch (NumberFormatException e3) {
-                reject (Code.HTTP_BAD_REQUEST,
+                reject(Code.HTTP_BAD_REQUEST,
                         requestLine, "NumberFormatException thrown");
             } catch (URISyntaxException e) {
-                reject (Code.HTTP_BAD_REQUEST,
+                reject(Code.HTTP_BAD_REQUEST,
                         requestLine, "URISyntaxException thrown");
             } catch (Exception e4) {
-                logger.log (Level.FINER, "ServerImpl.Exchange (2)", e4);
+                logger.log(Level.FINER, "ServerImpl.Exchange (2)", e4);
                 closeConnection(connection);
             }
         }
@@ -663,60 +667,59 @@ class ServerImpl implements TimeSource {
         class LinkHandler implements HttpHandler {
             Filter.Chain nextChain;
 
-            LinkHandler (Filter.Chain nextChain) {
+            LinkHandler(Filter.Chain nextChain) {
                 this.nextChain = nextChain;
             }
 
-            public void handle (HttpExchange exchange) throws IOException {
-                nextChain.doFilter (exchange);
+            public void handle(HttpExchange exchange) throws IOException {
+                nextChain.doFilter(exchange);
             }
         }
 
-        void reject (int code, String requestStr, String message) {
+        void reject(int code, String requestStr, String message) {
             rejected = true;
-            logReply (code, requestStr, message);
-            sendReply (
-                code, false, "<h1>"+code+Code.msg(code)+"</h1>"+message
+            logReply(code, requestStr, message);
+            sendReply(
+                    code, false, "<h1>" + code + Code.msg(code) + "</h1>" + message
             );
             closeConnection(connection);
         }
 
-        void sendReply (
-            int code, boolean closeNow, String text)
-        {
+        void sendReply(
+                int code, boolean closeNow, String text) {
             try {
-                StringBuilder builder = new StringBuilder (512);
-                builder.append ("HTTP/1.1 ")
-                    .append (code).append (Code.msg(code)).append ("\r\n");
+                StringBuilder builder = new StringBuilder(512);
+                builder.append("HTTP/1.1 ")
+                        .append(code).append(Code.msg(code)).append("\r\n");
 
                 if (text != null && text.length() != 0) {
-                    builder.append ("Content-Length: ")
-                        .append (text.length()).append ("\r\n")
-                        .append ("Content-Type: text/html\r\n");
+                    builder.append("Content-Length: ")
+                            .append(text.length()).append("\r\n")
+                            .append("Content-Type: text/html\r\n");
                 } else {
-                    builder.append ("Content-Length: 0\r\n");
+                    builder.append("Content-Length: 0\r\n");
                     text = "";
                 }
                 if (closeNow) {
-                    builder.append ("Connection: close\r\n");
+                    builder.append("Connection: close\r\n");
                 }
-                builder.append ("\r\n").append (text);
+                builder.append("\r\n").append(text);
                 String s = builder.toString();
                 byte[] b = s.getBytes("ISO8859_1");
-                rawout.write (b);
+                rawout.write(b);
                 rawout.flush();
                 if (closeNow) {
                     closeConnection(connection);
                 }
             } catch (IOException e) {
-                logger.log (Level.FINER, "ServerImpl.sendReply", e);
+                logger.log(Level.FINER, "ServerImpl.sendReply", e);
                 closeConnection(connection);
             }
         }
 
     }
 
-    void logReply (int code, String requestStr, String text) {
+    void logReply(int code, String requestStr, String text) {
         if (!logger.isLoggable(Level.FINE)) {
             return;
         }
@@ -725,13 +728,13 @@ class ServerImpl implements TimeSource {
         }
         String r;
         if (requestStr.length() > 80) {
-           r = requestStr.substring (0, 80) + "<TRUNCATED>";
+            r = requestStr.substring(0, 80) + "<TRUNCATED>";
         } else {
-           r = requestStr;
+            r = requestStr;
         }
         String message = r + " [" + code + " " +
-                    Code.msg(code) + "] ("+text+")";
-        logger.fine (message);
+                Code.msg(code) + "] (" + text + ")";
+        logger.fine(message);
     }
 
     long getTicks() {
@@ -742,33 +745,34 @@ class ServerImpl implements TimeSource {
         return time;
     }
 
-    void delay () {
+    void delay() {
         Thread.yield();
         try {
-            Thread.sleep (200);
-        } catch (InterruptedException e) {}
+            Thread.sleep(200);
+        } catch (InterruptedException e) {
+        }
     }
 
     private int exchangeCount = 0;
 
-    synchronized void startExchange () {
-        exchangeCount ++;
+    synchronized void startExchange() {
+        exchangeCount++;
     }
 
-    synchronized int endExchange () {
-        exchangeCount --;
+    synchronized int endExchange() {
+        exchangeCount--;
         assert exchangeCount >= 0;
         return exchangeCount;
     }
 
-    HttpServer getWrapper () {
+    HttpServer getWrapper() {
         return wrapper;
     }
 
-    void requestStarted (HttpConnection c) {
+    void requestStarted(HttpConnection c) {
         c.creationTime = getTime();
-        c.setState (State.REQUEST);
-        reqConnections.add (c);
+        c.setState(State.REQUEST);
+        reqConnections.add(c);
     }
 
     // called after a request has been completely read
@@ -778,38 +782,38 @@ class ServerImpl implements TimeSource {
     // that ensures the client reads the response in a timely
     // fashion.
 
-    void requestCompleted (HttpConnection c) {
+    void requestCompleted(HttpConnection c) {
         assert c.getState() == State.REQUEST;
-        reqConnections.remove (c);
+        reqConnections.remove(c);
         c.rspStartedTime = getTime();
-        rspConnections.add (c);
-        c.setState (State.RESPONSE);
+        rspConnections.add(c);
+        c.setState(State.RESPONSE);
     }
 
     // called after response has been sent
-    void responseCompleted (HttpConnection c) {
+    void responseCompleted(HttpConnection c) {
         assert c.getState() == State.RESPONSE;
-        rspConnections.remove (c);
-        c.setState (State.IDLE);
+        rspConnections.remove(c);
+        c.setState(State.IDLE);
     }
 
     /**
      * TimerTask run every CLOCK_TICK ms
      */
     class ServerTimerTask extends TimerTask {
-        public void run () {
+        public void run() {
             LinkedList<HttpConnection> toClose = new LinkedList<HttpConnection>();
             time = System.currentTimeMillis();
-            ticks ++;
+            ticks++;
             synchronized (idleConnections) {
                 for (HttpConnection c : idleConnections) {
                     if (c.time <= time) {
-                        toClose.add (c);
+                        toClose.add(c);
                     }
                 }
                 for (HttpConnection c : toClose) {
-                    idleConnections.remove (c);
-                    allConnections.remove (c);
+                    idleConnections.remove(c);
+                    allConnections.remove(c);
                     c.close();
                 }
             }
@@ -819,20 +823,20 @@ class ServerImpl implements TimeSource {
     class ServerTimerTask1 extends TimerTask {
 
         // runs every TIMER_MILLIS
-        public void run () {
+        public void run() {
             LinkedList<HttpConnection> toClose = new LinkedList<HttpConnection>();
             time = System.currentTimeMillis();
             synchronized (reqConnections) {
                 if (MAX_REQ_TIME != -1) {
                     for (HttpConnection c : reqConnections) {
                         if (c.creationTime + TIMER_MILLIS + MAX_REQ_TIME <= time) {
-                            toClose.add (c);
+                            toClose.add(c);
                         }
                     }
                     for (HttpConnection c : toClose) {
-                        logger.log (Level.FINE, "closing: no request: " + c);
-                        reqConnections.remove (c);
-                        allConnections.remove (c);
+                        logger.log(Level.FINE, "closing: no request: " + c);
+                        reqConnections.remove(c);
+                        allConnections.remove(c);
                         c.close();
                     }
                 }
@@ -841,14 +845,14 @@ class ServerImpl implements TimeSource {
             synchronized (rspConnections) {
                 if (MAX_RSP_TIME != -1) {
                     for (HttpConnection c : rspConnections) {
-                        if (c.rspStartedTime + TIMER_MILLIS +MAX_RSP_TIME <= time) {
-                            toClose.add (c);
+                        if (c.rspStartedTime + TIMER_MILLIS + MAX_RSP_TIME <= time) {
+                            toClose.add(c);
                         }
                     }
                     for (HttpConnection c : toClose) {
-                        logger.log (Level.FINE, "closing: no response: " + c);
-                        rspConnections.remove (c);
-                        allConnections.remove (c);
+                        logger.log(Level.FINE, "closing: no response: " + c);
+                        rspConnections.remove(c);
+                        allConnections.remove(c);
                         c.close();
                     }
                 }
@@ -856,14 +860,14 @@ class ServerImpl implements TimeSource {
         }
     }
 
-    void logStackTrace (String s) {
-        logger.finest (s);
-        StringBuilder b = new StringBuilder ();
+    void logStackTrace(String s) {
+        logger.finest(s);
+        StringBuilder b = new StringBuilder();
         StackTraceElement[] e = Thread.currentThread().getStackTrace();
-        for (int i=0; i<e.length; i++) {
-            b.append (e[i].toString()).append("\n");
+        for (int i = 0; i < e.length; i++) {
+            b.append(e[i].toString()).append("\n");
         }
-        logger.finest (b.toString());
+        logger.finest(b.toString());
     }
 
     static long getTimeMillis(long secs) {
